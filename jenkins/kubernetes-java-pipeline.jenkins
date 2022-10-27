@@ -1,0 +1,107 @@
+def testVersion = [ name: "${RELEASE_VERSION}",
+                        archived: true,
+                        released: false,
+                        description: 'desc',
+                        project: 'PYT' ]
+                        
+def testSite = 'https://paulyang.atlassian.net'
+
+pipeline {
+    
+  agent {
+     node { 
+        label 'docker-in-docker'
+        } 
+  }
+  stages {
+    stage('Checkout Scm') {
+      steps {
+        git(credentialsId: 'paul-github', url: 'https://github.com/cloudbees-pyang/kubernetes-for-java-developers.git')
+      }
+    }
+
+    stage('Verify Building Environment') {
+      steps {
+        sh '''export'''
+      }
+    }
+
+    stage('Create New Version In Jira') {
+      steps {
+    jiraNewVersion version: testVersion, site: 'jira-site'
+      }
+    }
+
+    stage('Build Artifact') {
+      steps {
+        sh '''cd app
+chmod a+x ./mvnw
+./mvnw package'''
+      }
+    }
+
+    stage('Code Scanning With Snyk') {
+      steps {
+          sh '''echo hello'''
+        snykSecurity snykInstallation: 'snyk-default', snykTokenId: 'Snyk', targetFile: 'app/pom.xml', failOnIssues: 'false', severity: 'high'
+      }
+    }
+
+    stage('Upload Artifact To Nexus') {
+      steps {
+    
+    nexusArtifactUploader(
+    nexusVersion: 'nexus3',
+    protocol: 'http',
+    nexusUrl: '34.120.125.63',
+    groupId: 'kubernetes-java',
+    version: "${RELEASE_VERSION}",
+    repository: 'maven-releases',
+    credentialsId: 'nexus-admin',
+    artifacts: [
+        [artifactId: 'demo',
+         classifier: '',
+         file: 'app/target/app.war',
+         type: 'war']
+    ]
+ )
+      }
+    }
+
+    stage('Prepare To Build Docker Image') {
+      steps {
+        sh '''cd app
+./mvnw -Dmaven.repo.local=./m2 clean package
+tar cvf m2.tar.gz ./m2'''
+      }
+    }
+    
+     stage('Docker Build') {
+      steps {
+      	sh "docker build -t poseidon1979/kubernetes-java:${RELEASE_VERSION} app/"
+      }
+    }
+
+    stage('Container Image Upload') {
+      steps {
+          
+withCredentials([usernamePassword(credentialsId: 'pyang-dockerhub', passwordVariable: 'dockerHubPassword', usernameVariable: 'dockerHubUser')]) {
+        	sh "docker login -u ${env.dockerHubUser} -p ${env.dockerHubPassword}"
+          sh "docker push poseidon1979/kubernetes-java:${RELEASE_VERSION}"
+        }
+        
+      }
+    }
+
+    stage('Helm Deployment') {
+      steps {
+        sh '''helm upgrade myapp manifests/myapp --set image.tag=${RELEASE_VERSION}
+#kubectl apply -f manifests/app.yaml'''
+      }
+    }
+
+  }
+  parameters {
+    string(name: 'RELEASE_VERSION', defaultValue: '1.0.3', description: null)
+  }
+}
